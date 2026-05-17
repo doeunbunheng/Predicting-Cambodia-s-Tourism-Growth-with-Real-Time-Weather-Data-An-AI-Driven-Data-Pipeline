@@ -1,0 +1,16 @@
+# Ignore Python bytecode files
+*.pyc
+__pycache__/
+
+# Ignore virtual environment folder
+venv/
+
+# Ignore data directories (Parquet files, CSVs, and checkpoints)
+data/bronze/*
+data/silver/*
+data/gold/*
+*.parquet
+*.csv
+
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
