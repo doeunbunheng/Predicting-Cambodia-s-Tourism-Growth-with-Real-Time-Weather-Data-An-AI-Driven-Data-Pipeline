@@ -1,4 +1,4 @@
-## scripts/dashboard.py — Fixed: chart and box always match
+## scripts/dashboard.py — Complete Version with Live Weather Tab
 import dash
 from dash import dcc, html, Input, Output
 import dash_bootstrap_components as dbc
@@ -6,7 +6,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
-import pickle, os
+import pickle, os, requests, random
+from collections import deque
 
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,6 +19,58 @@ MONTHS = ["","Jan","Feb","Mar","Apr","May","Jun",
 with open("data/gold/model_best.pkl",     "rb") as f: model    = pickle.load(f)
 with open("data/gold/model_features.pkl", "rb") as f: features = pickle.load(f)
 
+# ── Live weather history (last 20 readings per city) ──
+weather_history = {
+    "Phnom Penh":    deque(maxlen=20),
+    "Siem Reap":     deque(maxlen=20),
+    "Sihanoukville": deque(maxlen=20),
+}
+CITIES = {
+    "Phnom Penh":    {"lat": 11.56, "lon": 104.92},
+    "Siem Reap":     {"lat": 13.36, "lon": 103.86},
+    "Sihanoukville": {"lat": 10.63, "lon": 103.52},
+}
+CITY_COLORS = {
+    "Phnom Penh":    "#378ADD",
+    "Siem Reap":     "#1D9E75",
+    "Sihanoukville": "#BA7517",
+}
+CITY_BASE_TEMP = {"Phnom Penh": 34, "Siem Reap": 33, "Sihanoukville": 32}
+
+def fetch_live_weather():
+    now = pd.Timestamp.now()
+    for city, coords in CITIES.items():
+        try:
+            r = requests.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude":  coords["lat"],
+                    "longitude": coords["lon"],
+                    "current":   ["temperature_2m","precipitation",
+                                  "windspeed_10m","relative_humidity_2m"],
+                    "timezone":  "Asia/Phnom_Penh"
+                }, timeout=10
+            )
+            cur = r.json()["current"]
+            weather_history[city].append({
+                "time":        now,
+                "temperature": cur["temperature_2m"],
+                "rain_mm":     cur["precipitation"],
+                "humidity":    cur["relative_humidity_2m"],
+                "source":      "LIVE"
+            })
+        except Exception:
+            weather_history[city].append({
+                "time":        now,
+                "temperature": round(CITY_BASE_TEMP[city] + random.uniform(-1.5,1.5), 1),
+                "rain_mm":     round(random.uniform(0, 1), 1),
+                "humidity":    random.randint(60, 80),
+                "source":      "SIMULATED"
+            })
+
+# Fetch on startup
+fetch_live_weather()
+
 # ── Load CSVs ─────────────────────────────────────────
 def load_data():
     gold = pd.read_csv("data/gold/fact_tourism_monthly.csv")
@@ -27,18 +80,15 @@ def load_data():
     pred["date"] = pd.to_datetime(pred["date"])
     return gold, pred, fi
 
-# ── Find column by keyword ────────────────────────────
 def find_col(df, *keywords):
     for col in df.columns:
         if all(k.lower() in col.lower() for k in keywords):
             return col
     return None
 
-# ── Run model for one month row ───────────────────────
 def predict_one(m, l12, l24, nt, nr, sr_r, sr_t):
     row = {
-        "lag_12":               l12,
-        "lag_24":               l24,
+        "lag_12": l12, "lag_24": l24,
         "ratio_1224":           l12 / (l24 + 1),
         "month":                m,
         "month_sin":            np.sin(2 * np.pi * m / 12),
@@ -58,17 +108,7 @@ def predict_one(m, l12, l24, nt, nr, sr_r, sr_t):
     ok  = [f for f in features if f in df.columns]
     return int(model.predict(df[ok])[0])
 
-# ── Core: compute all 12 months, return plain lists ───
 def compute_all_months(gold, sel_month, nat_temp, nat_rain, sr_rain, sr_temp):
-    """
-    Returns (labels, actuals, preds, live_pred, lag12_sel)
-    - labels  : ["Jan 2026", ..., "Dec 2026"]
-    - actuals : 2025 actual arrivals for each month
-    - preds   : 2026 predicted arrivals for each month (model output)
-    - live_pred : prediction for sel_month (same as preds[sel_month-1])
-    - lag12_sel : 2025 actual for sel_month
-    """
-    # Weather fallback averages per month
     temp_cols = [c for c in gold.columns if "temp" in c.lower() and "avg" in c.lower()]
     rain_cols = [c for c in gold.columns if "rain" in c.lower() and "total" in c.lower()]
     sr_temp_c = find_col(gold, "siem_reap", "temp") or find_col(gold, "siem", "temp")
@@ -85,14 +125,11 @@ def compute_all_months(gold, sel_month, nat_temp, nat_rain, sr_rain, sr_temp):
     sr_rain_avg  = month_avg(sr_rain_c)
 
     labels, actuals, preds = [], [], []
-
     for m in range(1, 13):
         r25 = gold[(gold["year"]==2025) & (gold["month"]==m)]
         r24 = gold[(gold["year"]==2024) & (gold["month"]==m)]
         l12 = int(r25["arrivals"].values[0]) if len(r25)>0 else 500000
         l24 = int(r24["arrivals"].values[0]) if len(r24)>0 else 480000
-
-        # Only the selected month uses slider values
         if m == sel_month:
             nt, nr, sr_r, sr_t = nat_temp, nat_rain, sr_rain, sr_temp
         else:
@@ -100,51 +137,35 @@ def compute_all_months(gold, sel_month, nat_temp, nat_rain, sr_rain, sr_temp):
             nr   = float(nat_rain_avg.get(m, 100.0))
             sr_r = float(sr_rain_avg.get(m, 80.0))
             sr_t = float(sr_temp_avg.get(m, 32.0))
-
         p = predict_one(m, l12, l24, nt, nr, sr_r, sr_t)
-
         labels.append(f"{MONTHS[m]}")
         actuals.append(l12)
         preds.append(p)
+    return labels, actuals, preds, preds[sel_month-1], actuals[sel_month-1]
 
-    live_pred  = preds[sel_month - 1]
-    lag12_sel  = actuals[sel_month - 1]
-    return labels, actuals, preds, live_pred, lag12_sel
-
-# ── Build forecast figure from precomputed lists ──────
 def make_forecast_fig(labels, actuals, preds, sel_month, live_pred, lag12_sel):
     chg   = (live_pred - lag12_sel) / lag12_sel * 100
     col_a = [C["amber"] if i+1==sel_month else C["blue"]  for i in range(12)]
     col_p = ["#E8A000"  if i+1==sel_month else C["teal"]  for i in range(12)]
-
     fig = go.Figure()
-    fig.add_bar(x=labels, y=actuals, name="2025 Actual",
-                marker_color=col_a, opacity=0.85)
-    fig.add_bar(x=labels, y=preds,   name="2026 Predicted",
-                marker_color=col_p)
+    fig.add_bar(x=labels, y=actuals, name="2025 Actual",   marker_color=col_a, opacity=0.85)
+    fig.add_bar(x=labels, y=preds,   name="2026 Predicted",marker_color=col_p)
     fig.add_annotation(
-        x=f"{MONTHS[sel_month]} 2026",
-        y=max(live_pred, lag12_sel),
-        text=(f"<b>{MONTHS[sel_month]} 2026</b><br>"
-              f"{live_pred:,}<br>{chg:+.1f}% vs 2025"),
+        x=MONTHS[sel_month], y=max(live_pred, lag12_sel),
+        text=(f"<b>{MONTHS[sel_month]} 2026</b><br>{live_pred:,}<br>{chg:+.1f}% vs 2025"),
         showarrow=True, arrowhead=2, arrowcolor=C["amber"],
         font=dict(color=C["amber"], size=11),
         bgcolor="white", bordercolor=C["amber"], borderwidth=1, ay=-55
     )
     fig.update_layout(
         barmode="group", plot_bgcolor="white", paper_bgcolor="white",
-        margin=dict(t=55, b=30, l=10, r=10),
-        xaxis=dict(tickangle=-30),
+        margin=dict(t=55,b=30,l=10,r=10), xaxis=dict(tickangle=-30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        title=dict(
-            text=(f"{MONTHS[sel_month]} 2026: predicted {live_pred:,} "
-                  f"({chg:+.1f}% vs 2025)"),
-            font=dict(size=12, color=C["amber"]), x=0.5
-        )
+        title=dict(text=f"{MONTHS[sel_month]} 2026: {live_pred:,} ({chg:+.1f}% vs 2025)",
+                   font=dict(size=12, color=C["amber"]), x=0.5)
     )
     return fig
 
-# ── Weather scatter ───────────────────────────────────
 def make_weather(gold, city="siem_reap"):
     nc = gold[~gold["year"].isin([2020,2021])].copy()
     rain_col = find_col(nc, city, "rain") or find_col(nc, city.split("_")[0], "rain")
@@ -154,8 +175,7 @@ def make_weather(gold, city="siem_reap"):
 
     def empty_fig(msg):
         f = go.Figure()
-        f.add_annotation(text=msg, xref="paper", yref="paper",
-                         x=0.5, y=0.5, showarrow=False)
+        f.add_annotation(text=msg, xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False)
         f.update_layout(plot_bgcolor="white", paper_bgcolor="white")
         return f
 
@@ -181,7 +201,7 @@ def make_weather(gold, city="siem_reap"):
 
 
 # ═══════════════════════════════════════════════════════
-# APP + LAYOUT
+# APP
 # ═══════════════════════════════════════════════════════
 app = dash.Dash(__name__,
                 external_stylesheets=[dbc.themes.FLATLY],
@@ -190,9 +210,9 @@ app = dash.Dash(__name__,
 app.layout = dbc.Container([
     dcc.Interval(id="interval", interval=30_000, n_intervals=0),
 
-    # ── Header ────────────────────────────────────────
+    # ── Header ──────────────────────────────────────
     dbc.Row([dbc.Col([
-        html.H2("Cambodia Tourism + Weather Analytics",
+        html.H2("🇰🇭 Cambodia Tourism + Weather Analytics",
                 className="text-white mb-0 fw-bold"),
         html.P("Open-Meteo · World Bank CSV · MOT PDF · Kafka · PySpark",
                className="text-white-50 mb-0 small"),
@@ -203,8 +223,37 @@ app.layout = dbc.Container([
 
     dbc.Tabs([
 
-        # ── TAB 1: Overview ───────────────────────────
-        dbc.Tab(label="Overview", children=[
+        # ════════ TAB 1: LIVE WEATHER ════════
+        dbc.Tab(label=" Live Weather", tab_id="tab-live", children=[
+
+            # Current readings cards
+            dbc.Row([dbc.Col(
+                html.H6(" Current Readings — Updates every 30 seconds",
+                        className="text-muted mt-3 mb-2 fw-bold")
+            )]),
+            dbc.Row(id="live-weather-cards", className="g-2 mb-2"),
+
+            # Temperature line chart
+            dbc.Row([dbc.Col(dbc.Card([
+                dbc.CardHeader(" Temperature (°C) — Real-Time Line Chart"),
+                dbc.CardBody(dcc.Graph(id="live-temp-chart", style={"height":"320px"}))
+            ], className="shadow-sm border-0 mt-2"))]),
+
+            # Humidity + Rainfall
+            dbc.Row([
+                dbc.Col(dbc.Card([
+                    dbc.CardHeader(" Humidity (%)"),
+                    dbc.CardBody(dcc.Graph(id="live-humidity-chart", style={"height":"260px"}))
+                ], className="shadow-sm border-0 mt-3"), width=6),
+                dbc.Col(dbc.Card([
+                    dbc.CardHeader(" Rainfall (mm)"),
+                    dbc.CardBody(dcc.Graph(id="live-rain-chart", style={"height":"260px"}))
+                ], className="shadow-sm border-0 mt-3"), width=6),
+            ]),
+        ]),
+
+        # ════════ TAB 2: OVERVIEW ════════
+        dbc.Tab(label=" Overview", tab_id="tab-overview", children=[
             dbc.Row([dbc.Col(dbc.Card([
                 dbc.CardHeader("Annual Tourist Arrivals 2012-2025"),
                 dbc.CardBody(dcc.Graph(id="annual-bar"))
@@ -221,8 +270,8 @@ app.layout = dbc.Container([
             ]),
         ]),
 
-        # ── TAB 2: Weather ────────────────────────────
-        dbc.Tab(label="Weather Analysis", children=[
+        # ════════ TAB 3: WEATHER ANALYSIS ════════
+        dbc.Tab(label=" Weather Analysis", tab_id="tab-weather", children=[
             dbc.Row([dbc.Col([
                 html.Label("Select City:", className="fw-semibold mt-3"),
                 dcc.Dropdown(id="city-dd", clearable=False, className="mb-3",
@@ -252,11 +301,11 @@ app.layout = dbc.Container([
             ], color="info", className="mt-3"))]),
         ]),
 
-        # ── TAB 3: ML Prediction ──────────────────────
-        dbc.Tab(label="ML Prediction", children=[
+        # ════════ TAB 4: ML PREDICTION ════════
+        dbc.Tab(label=" ML Prediction", tab_id="tab-ml", children=[
             dbc.Row([
                 dbc.Col([dbc.Card([
-                    dbc.CardHeader("Input Parameters"),
+                    dbc.CardHeader(" Input Parameters"),
                     dbc.CardBody([
                         html.Label("Month:"),
                         dcc.Slider(id="sl-month", min=1, max=12, step=1, value=6,
@@ -296,10 +345,11 @@ app.layout = dbc.Container([
                 ], width=8),
             ]),
         ]),
-    ]),
+
+    ], id="main-tabs", active_tab="tab-live"),
 
     html.Hr(className="mt-4"),
-    html.P("Cambodia Tourism Analytics | ITC Data Engineering | "
+    html.P("🇰🇭 Cambodia Tourism Analytics | ITC Data Engineering | "
            "Kafka + PySpark + Gold Layer + RandomForest",
            className="text-muted text-center small pb-2"),
 
@@ -345,7 +395,128 @@ def refresh_kpis(_):
 
 
 # ═══════════════════════════════════════════════════════
-# CALLBACK 2 — Overview
+# CALLBACK 2 — Live Weather Charts
+# ═══════════════════════════════════════════════════════
+@app.callback(
+    Output("live-temp-chart",     "figure"),
+    Output("live-humidity-chart", "figure"),
+    Output("live-rain-chart",     "figure"),
+    Output("live-weather-cards",  "children"),
+    Input("interval", "n_intervals")
+)
+def refresh_live_weather(_):
+    fetch_live_weather()
+
+    def empty_fig(msg="No data"):
+        f = go.Figure()
+        f.add_annotation(text=msg, xref="paper", yref="paper",
+                         x=0.5, y=0.5, showarrow=False, font=dict(size=13))
+        f.update_layout(plot_bgcolor="white", paper_bgcolor="white",
+                        margin=dict(t=10,b=10,l=10,r=10))
+        return f
+
+    if all(len(v) == 0 for v in weather_history.values()):
+        ef = empty_fig("Fetching live weather...")
+        return ef, ef, ef, html.P("Loading...")
+
+    # ── Temperature line chart ─────────────────────
+    fig_temp = go.Figure()
+    for city, hist in weather_history.items():
+        if not hist: continue
+        df_h = pd.DataFrame(list(hist))
+        fig_temp.add_scatter(
+            x=df_h["time"], y=df_h["temperature"],
+            name=city, mode="lines+markers",
+            line=dict(color=CITY_COLORS[city], width=2.5),
+            marker=dict(size=7),
+            hovertemplate=f"<b>{city}</b><br>%{{y:.1f}}°C<br>%{{x|%H:%M:%S}}<extra></extra>"
+        )
+    fig_temp.update_layout(
+        plot_bgcolor="white", paper_bgcolor="white",
+        margin=dict(t=15,b=40,l=10,r=10),
+        xaxis=dict(tickformat="%H:%M:%S", tickangle=-30,
+                   showgrid=True, gridcolor="#EEEEEE"),
+        yaxis=dict(title="Temperature (°C)", showgrid=True, gridcolor="#EEEEEE"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        hovermode="x unified"
+    )
+
+    # ── Humidity line chart ────────────────────────
+    fig_hum = go.Figure()
+    for city, hist in weather_history.items():
+        if not hist: continue
+        df_h = pd.DataFrame(list(hist))
+        fig_hum.add_scatter(
+            x=df_h["time"], y=df_h["humidity"],
+            name=city, mode="lines+markers",
+            line=dict(color=CITY_COLORS[city], width=2.5),
+            marker=dict(size=7),
+        )
+    fig_hum.update_layout(
+        plot_bgcolor="white", paper_bgcolor="white",
+        margin=dict(t=15,b=40,l=10,r=10),
+        xaxis=dict(tickformat="%H:%M:%S", tickangle=-30,
+                   showgrid=True, gridcolor="#EEEEEE"),
+        yaxis=dict(title="Humidity (%)", showgrid=True, gridcolor="#EEEEEE"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        showlegend=False
+    )
+
+    # ── Rainfall bar chart ─────────────────────────
+    fig_rain = go.Figure()
+    for city, hist in weather_history.items():
+        if not hist: continue
+        df_h = pd.DataFrame(list(hist))
+        fig_rain.add_bar(
+            x=df_h["time"], y=df_h["rain_mm"],
+            name=city, marker_color=CITY_COLORS[city], opacity=0.85,
+        )
+    fig_rain.update_layout(
+        plot_bgcolor="white", paper_bgcolor="white",
+        barmode="group",
+        margin=dict(t=15,b=40,l=10,r=10),
+        xaxis=dict(tickformat="%H:%M:%S", tickangle=-30,
+                   showgrid=True, gridcolor="#EEEEEE"),
+        yaxis=dict(title="Rainfall (mm)", showgrid=True, gridcolor="#EEEEEE"),
+        showlegend=False
+    )
+
+    # ── Current reading cards ──────────────────────
+    cards = []
+    for city, hist in weather_history.items():
+        if not hist: continue
+        lat = hist[-1]
+        src_color = "success" if lat["source"]=="LIVE" else "warning"
+        src_label = "🟢 LIVE" if lat["source"]=="LIVE" else "🟡 SIMULATED"
+        cards.append(dbc.Col(dbc.Card([
+            dbc.CardBody([
+                html.H6(city, className="fw-bold mb-1",
+                        style={"color": CITY_COLORS[city]}),
+                html.H3(f"{lat['temperature']}°C",
+                        className="fw-bold mb-0",
+                        style={"color": CITY_COLORS[city]}),
+                dbc.Badge(src_label, color=src_color,
+                          className="mb-2 mt-1"),
+                html.Div([
+                    html.Small(" Humidity", className="text-muted"),
+                    html.Strong(f" {lat['humidity']}%",
+                                style={"color": CITY_COLORS[city]}),
+                ]),
+                html.Div([
+                    html.Small(" Rainfall", className="text-muted"),
+                    html.Strong(f" {lat['rain_mm']} mm",
+                                style={"color": CITY_COLORS[city]}),
+                ]),
+                html.Small(f" {lat['time'].strftime('%H:%M:%S')}",
+                           className="d-block text-muted mt-1"),
+            ], className="text-center")
+        ], className="shadow-sm border-0 h-100"), width=4))
+
+    return fig_temp, fig_hum, fig_rain, cards
+
+
+# ═══════════════════════════════════════════════════════
+# CALLBACK 3 — Overview Charts
 # ═══════════════════════════════════════════════════════
 @app.callback(
     Output("annual-bar",   "figure"),
@@ -377,13 +548,16 @@ def refresh_overview(_):
         textposition="outside"))
     fig_a.add_annotation(x=2020, y=annual["arrivals"].max()*0.25,
         text="COVID", showarrow=True, arrowhead=2, font=dict(color="red"))
+    fig_a.add_annotation(x=2024, y=annual[annual["year"]==2024]["arrivals"].values[0]+300000,
+        text=" Recovery", showarrow=True, arrowhead=2, font=dict(color=C["teal"]))
     fig_a.update_layout(plot_bgcolor="white", paper_bgcolor="white",
         margin=dict(t=20,b=10,l=10,r=20),
         xaxis=dict(tickmode="linear"), yaxis_title="Arrivals")
 
     fig_t = px.line(gold, x="date", y="arrivals",
                     color_discrete_sequence=[C["blue"]])
-    fig_t.add_vrect(x0="2020-01-01", x1="2022-06-01", fillcolor="red", opacity=0.08,
+    fig_t.add_vrect(x0="2020-01-01", x1="2022-06-01",
+                    fillcolor="red", opacity=0.08,
                     annotation_text="COVID", annotation_position="top left")
     fig_t.update_layout(plot_bgcolor="white", paper_bgcolor="white",
         margin=dict(t=10,b=10,l=10,r=10),
@@ -391,7 +565,8 @@ def refresh_overview(_):
 
     if "season" in nc.columns:
         s = nc.groupby("season")["arrivals"].sum().reset_index()
-        fig_s = px.pie(s, names="season", values="arrivals", hole=0.4, color="season",
+        fig_s = px.pie(s, names="season", values="arrivals", hole=0.4,
+                       color="season",
                        color_discrete_map={"Dry":"#F4A460","Wet":"#4169E1"})
     else:
         fig_s = empty("No season column")
@@ -401,7 +576,7 @@ def refresh_overview(_):
 
 
 # ═══════════════════════════════════════════════════════
-# CALLBACK 3 — Weather
+# CALLBACK 4 — Weather Analysis
 # ═══════════════════════════════════════════════════════
 @app.callback(
     Output("rain-chart","figure"),
@@ -436,19 +611,18 @@ def refresh_weather(city, _):
 
 
 # ═══════════════════════════════════════════════════════
-# CALLBACK 4 — ML chart + prediction box
-# Single callback → chart and box ALWAYS use identical numbers
+# CALLBACK 5 — ML Prediction
 # ═══════════════════════════════════════════════════════
 @app.callback(
     Output("fc-chart",  "figure"),
     Output("val-chart", "figure"),
     Output("pred-out",  "children"),
-    Input("interval",    "n_intervals"),
-    Input("sl-month",    "value"),
-    Input("sl-temp",     "value"),
-    Input("sl-rain",     "value"),
-    Input("sl-sr-rain",  "value"),
-    Input("sl-sr-temp",  "value"),
+    Input("interval",   "n_intervals"),
+    Input("sl-month",   "value"),
+    Input("sl-temp",    "value"),
+    Input("sl-rain",    "value"),
+    Input("sl-sr-rain", "value"),
+    Input("sl-sr-temp", "value"),
 )
 def refresh_ml(_, month, nat_temp, nat_rain, sr_rain, sr_temp):
     def empty(msg=""):
@@ -458,24 +632,16 @@ def refresh_ml(_, month, nat_temp, nat_rain, sr_rain, sr_temp):
                              x=0.5, y=0.5, showarrow=False)
         f.update_layout(plot_bgcolor="white", paper_bgcolor="white")
         return f
-
     try:
         gold, pred, _ = load_data()
-
-        # ── ONE call computes everything ──────────────
         labels, actuals, preds, live_pred, lag12_sel = compute_all_months(
             gold, month, nat_temp, nat_rain, sr_rain, sr_temp)
-
-        # ── Bar chart built from same lists ───────────
-        fig_fc = make_forecast_fig(
-            labels, actuals, preds, month, live_pred, lag12_sel)
-
+        fig_fc = make_forecast_fig(labels, actuals, preds, month, live_pred, lag12_sel)
     except Exception as e:
         fig_fc    = empty(f"Forecast error: {e}")
         live_pred = 0
         lag12_sel = 1
 
-    # ── Validation chart ──────────────────────────────
     try:
         fig_val = go.Figure()
         fig_val.add_scatter(x=pred["date"], y=pred["actual"], name="Actual",
@@ -491,8 +657,8 @@ def refresh_ml(_, month, nat_temp, nat_rain, sr_rain, sr_temp):
     except Exception as e:
         fig_val = empty(f"Validation error: {e}")
 
-    # ── Prediction box — same live_pred as bar chart ──
     try:
+        gold, _, _ = load_data()
         r24   = gold[(gold["year"]==2024) & (gold["month"]==month)]
         lag24 = int(r24["arrivals"].values[0]) if len(r24)>0 else 480000
         chg   = (live_pred - lag12_sel) / lag12_sel * 100
