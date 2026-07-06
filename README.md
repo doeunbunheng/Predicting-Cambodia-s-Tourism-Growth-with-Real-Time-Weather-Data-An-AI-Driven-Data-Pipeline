@@ -22,7 +22,7 @@ The answer? **Weather has less than 2% impact on arrivals.** The same month last
 ##  Team Members
 
 | Name | Role |
-|------|-----------|------|
+|------|------|
 | Chheng Sothean      | Team Leader — Architecture |
 | Chiv Mengchou       | Data Engineer — APIs |
 | Chho Sengmeng       | Streaming Engineer — Kafka |
