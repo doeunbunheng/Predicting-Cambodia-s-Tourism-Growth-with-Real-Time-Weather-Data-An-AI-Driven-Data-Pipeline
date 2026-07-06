@@ -21,15 +21,15 @@ The answer? **Weather has less than 2% impact on arrivals.** The same month last
 
 ##  Team Members
 
-| Name | Student ID | Role |
+| Name | Role |
 |------|-----------|------|
-| Chheng Sothean     | e20220686 | Team Leader — Architecture |
-| Chiv Mengchou      | e20221028 | Data Engineer — APIs |
-| Chho Sengmeng      | e20220296 | Streaming Engineer — Kafka |
-| Choub Botumraksa   | e20221709 | PySpark Engineer — ETL |
-| Din Reaksa         | e20221070 | DW Engineer — Gold Layer |
-| Doeun Bunheng      | e20221528 | ML Engineer + App Dev |
-| Mon Sreylin        | e20221701 | Demo Lead |
+| Chheng Sothean      | Team Leader — Architecture |
+| Chiv Mengchou       | Data Engineer — APIs |
+| Chho Sengmeng       | Streaming Engineer — Kafka |
+| Choub Botumraksa    | PySpark Engineer — ETL |
+| Din Reaksa          | DW Engineer — Gold Layer |
+| Doeun Bunheng       | ML Engineer + App Dev Leader|
+| Mon Sreylin         | Demo  |
 
 ---
 
